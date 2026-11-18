@@ -1,5 +1,6 @@
 """Островок: плавающая «таблетка» с обложкой, названием, управлением и живой волной."""
 import ctypes
+import logging
 import math
 import time
 
@@ -18,6 +19,7 @@ from .media import MediaState
 CW, CH = 232.0, 44.0      # свёрнутый размер
 EW, EH = 372.0, 152.0     # раскрытый размер
 PAD = 4.0
+log = logging.getLogger("isle.island")
 
 
 def lerp(a, b, t): return a + (b - a) * t
@@ -29,6 +31,70 @@ def _mid(a, b): return QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
 def lerp_rect(a, b, t):
     return QRectF(lerp(a.x(), b.x(), t), lerp(a.y(), b.y(), t),
                   lerp(a.width(), b.width(), t), lerp(a.height(), b.height(), t))
+
+
+_WINAPI = None
+
+
+def _winapi():
+    """Лениво готовим вызовы WinAPI (один раз)."""
+    global _WINAPI
+    if _WINAPI is None:
+        from ctypes import wintypes
+
+        class APPBARDATA(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                        ("uCallbackMessage", wintypes.UINT), ("uEdge", wintypes.UINT),
+                        ("rc", wintypes.RECT), ("lParam", wintypes.LPARAM)]
+
+        sh, u = ctypes.windll.shell32, ctypes.windll.user32
+        sh.SHAppBarMessage.argtypes = [wintypes.DWORD, ctypes.POINTER(APPBARDATA)]
+        sh.SHAppBarMessage.restype = ctypes.c_size_t
+        u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u.FindWindowW.restype = wintypes.HWND
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        _WINAPI = (APPBARDATA, wintypes, sh, u)
+    return _WINAPI
+
+
+def _taskbar_info(scr):
+    """Панель задач основного экрана через WinAPI: (kind, полоса QRect, автоскрытие, видимость 0..1) или None.
+    Работает и с обычной панелью, и с автоскрываемой. Слева/справа не поддерживается."""
+    if not IS_WINDOWS or scr != QGuiApplication.primaryScreen():
+        return None
+    try:
+        APPBARDATA, wintypes, sh, u = _winapi()
+        abd = APPBARDATA()
+        abd.cbSize = ctypes.sizeof(APPBARDATA)
+        autohide = bool(sh.SHAppBarMessage(4, ctypes.byref(abd)) & 1)       # ABM_GETSTATE
+        if not sh.SHAppBarMessage(5, ctypes.byref(abd)):                    # ABM_GETTASKBARPOS
+            return None
+        edge, rc = abd.uEdge, abd.rc                                        # 0 слева, 1 сверху, 2 справа, 3 снизу
+        win = wintypes.RECT()
+        hwnd = u.FindWindowW("Shell_TrayWnd", None)
+        have_win = bool(hwnd) and bool(u.GetWindowRect(hwnd, ctypes.byref(win)))
+    except Exception:
+        log.exception("не удалось опросить панель задач")
+        return None
+    if edge not in (1, 3):
+        return None
+    g, d = scr.geometry(), scr.devicePixelRatio()
+    thick_px = rc.bottom - rc.top
+    if not 20 <= thick_px <= 240 and have_win:
+        thick_px = win.bottom - win.top
+    if not 20 <= thick_px <= 240:
+        thick_px = 48
+    thick = thick_px / d
+    frac = 1.0
+    if edge == 3:
+        band = QRect(g.left(), int(g.bottom() + 1 - thick), g.width(), int(thick))
+        if autohide and have_win:
+            frac = (g.bottom() + 1 - (g.top() + (win.top - g.top()) / d)) / thick
+    else:
+        band = QRect(g.left(), g.top(), g.width(), int(thick))
+        if autohide and have_win:
+            frac = ((g.top() + (win.bottom - g.top()) / d) - g.top()) / thick
+    return ("bottom" if edge == 3 else "top"), band, autohide, max(0.0, min(1.0, frac))
 
 
 def dominant_color(img: QImage) -> QColor:
@@ -115,6 +181,8 @@ class IslandWidget(QWidget):
         self._scale = 1.0 if embedded else cfg.get("island_scale") / 100.0
         self._dock = None            # None | "bottom" | "top" — пристыкован к панели задач
         self._anchor_bottom = False  # при доке снизу панель раскрывается вверх
+        self._autohide, self._band, self._warned = False, None, False
+        self.dock_vis, self._tb_t, self._tb_target = 1.0, 0.0, 1.0   # видимость вместе с панелью задач
         self._ch = CH                # высота свёрнутой таблетки (в доке подгоняется под панель задач)
 
         self._f_title = QFont(T.FONT); self._f_title.setPixelSize(14); self._f_title.setWeight(QFont.DemiBold)
@@ -182,6 +250,9 @@ class IslandWidget(QWidget):
     @staticmethod
     def _taskbar_band(scr):
         """Где панель задач на этом экране: (\"bottom\"|\"top\"|None, QRect). Слева/справа и автоскрытие не поддерживаются."""
+        info = _taskbar_info(scr)
+        if info:
+            return info[0], info[1]
         g, a = scr.geometry(), scr.availableGeometry()
         if a.bottom() < g.bottom():
             return "bottom", QRect(g.left(), a.bottom() + 1, g.width(), g.bottom() - a.bottom())
@@ -192,6 +263,9 @@ class IslandWidget(QWidget):
     def _apply_dock(self, kind, band, x_left, scr):
         s = self._scale
         self._dock, self._anchor_bottom = kind, kind == "bottom"
+        self._band = band
+        info = _taskbar_info(scr)
+        self._autohide = bool(info and info[2])
         self._ch = max(30.0, min(CH, (band.height() - 8) / s))
         cy = band.center().y()
         y = cy - (PAD + EH - self._ch / 2) * s if kind == "bottom" else cy - (PAD + self._ch / 2) * s
@@ -203,6 +277,7 @@ class IslandWidget(QWidget):
 
     def _undock(self):
         self._dock, self._anchor_bottom, self._ch = None, False, CH
+        self._autohide, self._band, self.dock_vis, self._tb_target = False, None, 1.0, 1.0
         self._update_mask()
 
     def _redock(self):
@@ -226,9 +301,30 @@ class IslandWidget(QWidget):
                     if dist < (90 if self._dock == kind else 50):
                         self._apply_dock(kind, band, (gp - self._drag_off).x(), scr)
                         return
+            if scr is not None and not self._warned:
+                g = scr.geometry()
+                if gp.y() > g.bottom() - 120 or gp.y() < g.top() + 120:
+                    self._warned = True
+                    log.warning("прилипание: панель задач не найдена (экран %s, рабочая область %s, info=%s)",
+                                g, scr.availableGeometry(), _taskbar_info(scr))
         if self._dock:
             self._undock()
         self.move(gp - self._drag_off)
+
+    def _update_dock_vis(self, now, dt):
+        """При автоскрытии панели задач островок появляется и исчезает вместе с ней."""
+        if not (self._dock and self._autohide):
+            self.dock_vis = 1.0
+            return
+        if now - self._tb_t > 0.05:
+            self._tb_t = now
+            scr = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
+            res = _taskbar_info(scr)
+            keep = self._hover or self._dragging or self.p > 0.02 or res is None
+            self._tb_target = 1.0 if keep else clamp(res[3] * 1.25)
+        self.dock_vis += (self._tb_target - self.dock_vis) * (1 - math.exp(-dt * 18))
+        if abs(self._tb_target - self.dock_vis) < 0.01:
+            self.dock_vis = self._tb_target
 
     def _keep_on_top(self):
         """Панель задач сама «топмост» — периодически возвращаем островок выше неё."""
@@ -317,19 +413,23 @@ class IslandWidget(QWidget):
         self._last = now
         dirty = False
         if not self.embedded:
+            self._update_dock_vis(now, dt)
             tv = 1.0 if self._should_show() else 0.0
             if self.vis != tv:
                 self.vis += (tv - self.vis) * (1 - math.exp(-dt * 14))
                 if abs(tv - self.vis) < 0.01:
                     self.vis = tv
-                if self.vis > 0 and not self.isVisible():
-                    self._restore_pos()
-                    self.show()
-                self.setWindowOpacity(self.vis)
-                if self.vis == 0 and self.isVisible():
-                    self.hide()
+            op = self.vis * self.dock_vis
+            if op > 0.01 and not self.isVisible():
+                self._restore_pos()
+                self.show()
             if not self.isVisible():
                 return
+            if op <= 0.01:
+                self.hide()
+                return
+            if abs(self.windowOpacity() - op) > 0.004:
+                self.setWindowOpacity(op)
         # раскрытие
         want = (self.embedded or self._pinned or now < self._flash_until
                 or (self._hover and self.cfg.get("expand_on_hover")))
