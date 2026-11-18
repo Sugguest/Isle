@@ -9,6 +9,7 @@ from . import autostart, theme as T
 from .constants import APP_NAME, GITHUB_REPO, data_dir
 from .icon import make_pixmap
 from .island import EH, IslandWidget
+from .snow import SnowOverlay
 from .updater import Updater
 from .version import __version__
 from .widgets import Button, Card, RailButton, Segmented, Toggle
@@ -49,7 +50,7 @@ class Page(QWidget):
 
     def section(self, text):
         lbl = QLabel(text.upper()); lbl.setObjectName("Section")
-        lbl.setContentsMargins(2, 12, 0, 0)
+        lbl.setContentsMargins(2, 12, 0, 8)
         self.col.addWidget(lbl)
 
     def add(self, w): self.col.addWidget(w)
@@ -83,6 +84,8 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._updates_page())
         lay.addWidget(self.pages, 1)
 
+        self.snow = SnowOverlay(root, cfg, self.pages)
+        self.snow.raise_()
         cfg.changed.connect(self._cfg_changed)
         updater.check_done.connect(self._on_checked)
         updater.progress.connect(self.bar.setValue)
@@ -233,6 +236,17 @@ class MainWindow(QMainWindow):
         c.add_row("Запускать вместе с Windows", "Isle стартует свёрнутым в трей", t)
         c.add_row("Закрытие окна сворачивает в трей", "Островок продолжит работать в фоне", self._toggle("close_to_tray"))
         pg.add(c)
+        pg.section("Новогоднее настроение")
+        cs = Card()
+        cs.add_row("Падающий снег", "Снежинки разлетаются, если провести по ним мышкой", self._toggle("snow_fall"))
+        cs.add_row("Сугробы на кнопках", "Снег лежит на кнопках, карточках и на островке", self._toggle("snow_caps"))
+        sa = QSlider(Qt.Horizontal); sa.setRange(10, 100); sa.setPageStep(10); sa.setFixedWidth(150)
+        sa.setValue(self.cfg.get("snow_amount"))
+        sav = QLabel(f"{sa.value()}%"); sav.setFixedWidth(44); sav.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        sa.valueChanged.connect(lambda v: (sav.setText(f"{v}%"), self.cfg.set("snow_amount", v)))
+        sab = QWidget(); sal = QHBoxLayout(sab); sal.setContentsMargins(0, 0, 0, 0); sal.addWidget(sa); sal.addWidget(sav)
+        cs.add_row("Количество снега", None, sab)
+        pg.add(cs)
         pg.section("Данные")
         c2 = Card()
         folder = Button("Открыть папку")
@@ -327,6 +341,11 @@ class MainWindow(QMainWindow):
     def quit_app(self):
         self.quitting = True
         QApplication.quit()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.snow.setGeometry(self.centralWidget().rect())
+        self.snow.raise_()
 
     def showEvent(self, e):
         if not self._dark_done:

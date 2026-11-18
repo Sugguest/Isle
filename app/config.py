@@ -16,6 +16,9 @@ DEFAULTS = {
     "hide_when_idle": True,
     "always_on_top": True,
     "dock_to_taskbar": True,
+    "snow_fall": True,
+    "snow_caps": True,
+    "snow_amount": 50,        # 10..100
     "island_dock": "",
     "wave_style": "bars",      # bars | wave
     "wave_color": "cover",     # cover | brand

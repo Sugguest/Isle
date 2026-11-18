@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QMenu, QWidget
 from . import theme as T
 from .audio import BANDS
 from .constants import IS_WINDOWS
+from .snow import draw_cap, snow_cap_path
 from .media import MediaState
 
 CW, CH = 232.0, 44.0      # свёрнутый размер
@@ -344,7 +345,7 @@ class IslandWidget(QWidget):
     def _update_mask(self):
         if self.embedded:
             return
-        r = self._pill_rect().adjusted(-1.5, -1.5, 1.5, 1.5).translated(PAD, PAD)
+        r = self._pill_rect().adjusted(-1.5, -5.5, 1.5, 1.5).translated(PAD, PAD)
         path = QPainterPath()
         path.addRoundedRect(r, self._radius() + 1.5, self._radius() + 1.5)
         s = self._scale
@@ -492,6 +493,8 @@ class IslandWidget(QWidget):
         qp.setPen(QPen(QColor(255, 255, 255, 24), 1))
         qp.setBrush(QColor(17, 18, 20, 248))
         qp.drawPath(path)
+        if self.cfg.get("snow_caps"):
+            draw_cap(qp, snow_cap_path(r.left() + rad * 0.5, r.right() - rad * 0.5, r.top() + 0.8, 3.6, 7.3, 14))
         accent = QColor(self._col_cur) if self.cfg.get("wave_color") == "cover" else QColor(T.BRAND)
 
         c0 = QRectF(r.left() + 8, r.top() + (self._ch - 28) / 2, 28, 28)
